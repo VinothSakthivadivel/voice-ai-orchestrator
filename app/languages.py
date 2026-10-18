@@ -101,6 +101,10 @@ TTS_LANGS: dict[str, dict[str, str]] = {
     "aws": _same(["hi-IN", "en-IN"]),
     "elevenlabs": _iso(["hi-IN", "ta-IN", "en-IN"]),
     "openai": _iso(["hi-IN", "mr-IN", "ta-IN", "ur-IN", "kn-IN", "ne-IN", "en-IN"]),
+    # free: Edge neural voices (hi,bn,ta,te,mr,gu,kn,ml,ur,en,ne) + gTTS (pa); others via browser speech
+    "free": _same(["hi-IN", "bn-IN", "ta-IN", "te-IN", "mr-IN", "gu-IN", "kn-IN", "ml-IN", "ur-IN", "en-IN",
+                   "ne-IN", "pa-IN"]),
+    "browser": _same(ALL_CODES),  # depends on the user's device voices
     "mock": _same(ALL_CODES),
 }
 
@@ -141,6 +145,8 @@ VOICES = {
     "openai": {c: OPENAI_VOICES for c in TTS_LANGS["openai"]},
     "elevenlabs": {c: [ELEVENLABS_DEFAULT_VOICE] for c in TTS_LANGS["elevenlabs"]},
     "google": {c: [] for c in TTS_LANGS["google"]},
+    "free": {**{c: v for c, v in AZURE_VOICES.items() if c not in ("or-IN", "pa-IN", "as-IN")}, "pa-IN": []},
+    "browser": {c: [] for c in ALL_CODES},
     "mock": {c: ["tone"] for c in ALL_CODES},
 }
 

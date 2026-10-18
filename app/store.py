@@ -24,9 +24,15 @@ def _scrub(d):
 
 def default_profiles() -> list[BotProfile]:
     return [
-        BotProfile(id="demo-mock", name="Demo (no keys, mock providers)", language="en-IN",
-                   description="Offline mock STT/LLM/TTS - test barge-in, VAD and the dashboard without keys.",
-                   llm={"provider": "mock", "greeting": "Hello! I am the demo bot. Say something or type below."}),
+        BotProfile(id="demo-free", name="Demo - real voice (no keys)", language="en-IN",
+                   description="Speaks with free Microsoft Edge neural voices (no key). STT/LLM are mocks: it echoes "
+                               "what you say/type. Change language to hi-IN, ta-IN, te-IN... to hear Indian voices.",
+                   llm={"provider": "mock", "greeting": "Hello! I am the demo voice bot. Say something, or type a "
+                                                        "message below, and I will answer out loud."},
+                   tts={"provider": "free"}),
+        BotProfile(id="demo-mock", name="Mock tones (offline pipeline test)", language="en-IN",
+                   description="Fully offline mock STT/LLM/TTS. TTS plays placeholder TONES, not speech.",
+                   llm={"provider": "mock", "greeting": "Hello! I am the offline mock bot."}),
         BotProfile(id="sarvam-hindi", name="Hindi support agent (Sarvam)", language="hi-IN",
                    description="All-Sarvam stack, best for Indic languages.",
                    stt={"provider": "sarvam"}, llm={"provider": "sarvam", "temperature": 0.4,
@@ -38,6 +44,10 @@ def default_profiles() -> list[BotProfile]:
         BotProfile(id="fast-english", name="Low-latency English-India (Deepgram + Groq + ElevenLabs)", language="en-IN",
                    stt={"provider": "deepgram"}, llm={"provider": "groq"}, tts={"provider": "elevenlabs"}),
     ]
+
+
+def _is_old_mock_demo(v) -> bool:
+    return bool(v) and v.get("name") == "Demo (no keys, mock providers)"
 
 
 class ProfileStore:
@@ -52,11 +62,16 @@ class ProfileStore:
         """Seed built-in profiles when the file is missing, empty or corrupt (fresh Render instance)."""
         with self._lock:
             d = self._read()
-            if not d or "demo-mock" not in d:
+            builtin_demo = ("demo-free", "demo-mock")
+            if not d or any(i not in d for i in builtin_demo) or _is_old_mock_demo(d.get("demo-mock")):
                 fresh = not d
                 for p in default_profiles():
-                    if fresh or p.id == "demo-mock":
+                    if fresh or p.id in builtin_demo:
+                        if p.id == "demo-mock" and _is_old_mock_demo(d.get("demo-mock")):
+                            d[p.id] = p.model_dump()  # relabel v1.0.0 demo so users know it plays tones
                         d.setdefault(p.id, p.model_dump())
+                # keep demos first in the list
+                d = {**{i: d[i] for i in builtin_demo if i in d}, **{k: v for k, v in d.items() if k not in builtin_demo}}
                 try:
                     self._write(d)
                 except OSError:

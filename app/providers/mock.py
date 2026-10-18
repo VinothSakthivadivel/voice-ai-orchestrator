@@ -37,7 +37,10 @@ class MockLLM(LLMProvider):
 
 @register
 class MockTTS(TTSProvider):
-    meta = ProviderMeta("tts", "mock", "Mock TTS (tone)", [], features=["no-key", "speed", "pitch"])
+    meta = ProviderMeta("tts", "mock", "Mock TTS - placeholder TONES, not speech (offline tests)", [],
+                        features=["no-key", "offline", "tones-only"],
+                        notes="Plays a beep-like tone per sentence so the pipeline can be tested fully offline. "
+                              "Use 'Free voices' or a real provider to hear actual speech.")
 
     async def synthesize(self, text, language, voice, opts, model=None):
         sr = 16000

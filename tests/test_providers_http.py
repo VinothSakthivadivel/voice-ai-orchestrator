@@ -193,7 +193,7 @@ async def test_elevenlabs_tts():
 async def test_openai_tts_emotion_instructions():
     def h(req):
         b = json.loads(req.content)
-        assert b["instructions"] and b["speed"] == 1.5 and b["response_format"] == "wav"
+        assert b["instructions"] and b["speed"] == 1.5 and b["response_format"] == "pcm"
         return httpx.Response(200, content=pcm_to_wav(PCM, 24000))
 
     p = get_provider("tts", "openai", Credentials({"openai": {"api_key": "k"}}), client(h))
@@ -219,3 +219,44 @@ async def test_sarvam_llm_and_deepgram_indic():
 
     p = get_provider("llm", "sarvam", Credentials({"sarvam": {"api_key": "k"}}), client(h))
     assert await p.complete([{"role": "user", "content": "hi"}], model=None, temperature=0.2, max_tokens=9, options={}) == "नमस्ते"
+
+
+async def test_free_tts_fallback_chain(monkeypatch):
+    from app.providers.tts import FreeTTS
+
+    p = get_provider("tts", "free", Credentials())
+
+    async def edge_ok(self, text, voice, opts):
+        assert voice == "hi-IN-SwaraNeural"
+        return __import__("app.providers.base", fromlist=["AudioChunk"]).AudioChunk(b"ID3mp3", "mp3", 24000)
+
+    monkeypatch.setattr(FreeTTS, "_edge", edge_ok)
+    assert (await p.synthesize("नमस्ते", "hi-IN", None, TTSOptions())).format == "mp3"
+
+    async def boom(self, *a, **k):
+        raise OSError("no network")
+
+    monkeypatch.setattr(FreeTTS, "_edge", boom)
+    monkeypatch.setattr(FreeTTS, "_gtts", boom)
+    ch = await p.synthesize("नमस्ते", "hi-IN", None, TTSOptions())
+    assert ch.format == "speech" and ch.data.decode() == "नमस्ते"  # browser speechSynthesis last resort
+    ch = await p.synthesize("ନମସ୍କାର", "or-IN", None, TTSOptions())  # no free neural voice for Odia
+    assert ch.format == "speech"
+
+
+async def test_voice_from_other_language_is_replaced(monkeypatch):
+    from app.providers.tts import FreeTTS
+
+    seen = {}
+
+    async def edge(self, text, voice, opts):
+        seen["v"] = voice
+        from app.providers.base import AudioChunk
+        return AudioChunk(b"ID3", "mp3", 24000)
+
+    monkeypatch.setattr(FreeTTS, "_edge", edge)
+    p = get_provider("tts", "free", Credentials())
+    await p.synthesize("வணக்கம்", "ta-IN", "en-IN-NeerjaNeural", TTSOptions())
+    assert seen["v"] == "ta-IN-PallaviNeural"
+    await p.synthesize("Hi", "en-IN", "en-IN-PrabhatNeural", TTSOptions())
+    assert seen["v"] == "en-IN-PrabhatNeural"

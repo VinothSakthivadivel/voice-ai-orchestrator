@@ -149,7 +149,9 @@ function formBot() {
   }
   return b;
 }
-function updateFormHints() {
+function updateFormHints(ev) {
+  // a voice from another language (e.g. en-IN-NeerjaNeural for Hindi) would not speak the new language
+  if (ev?.target?.name === 'language') { const v = $('#botForm [name="tts.voice"]'); if (v.value && /^[a-z]{2,3}-[A-Z]{2}-/.test(v.value) && !v.value.startsWith(ev.target.value)) v.value = ''; }
   const f = formBot(); const l = S.langs.find(x => x.code === f.language);
   const prov = n => S.providers.find(p => p.layer === n.split('.')[0] && p.name === getPath(f, n));
   for (const layer of ['stt', 'llm', 'tts']) {
@@ -171,7 +173,7 @@ $('#dupBot').onclick = () => { const b = formBot(); b.id = null; b.name += ' (co
 $('#botForm').onsubmit = async e => {
   e.preventDefault();
   try { const saved = await api('/api/bots', { method: 'POST', body: JSON.stringify(formBot()) }); await loadBots(saved.id); editBot(saved); toast('Saved ' + saved.name); }
-  catch (err) { alert('Save failed: ' + err.message); }
+  catch (err) { alert('Save failed: ' + err.message.replace(/^\{"detail":/, '').slice(0, 400)); }
 };
 $('#delBot').onclick = async () => { const b = formBot(); if (!b.id || !confirm('Delete ' + b.name + '?')) return; await api('/api/bots/' + b.id, { method: 'DELETE' }); await loadBots(); if (S.bots[0]) editBot(S.bots[0]); };
 $('#useBot').onclick = () => { const b = formBot(); if (b.id) $('#cBot').value = b.id; syncControlsFromBot(); $('[data-tab=console]').click(); };
@@ -198,14 +200,14 @@ for (const id of ['lTemp', 'lSpeed', 'lPitch', 'lStyle', 'lBarge', 'lSpk', 'lThr
 
 // ------------------------------------------------------------ audio playback with barge-in support
 class Player {
-  constructor() { this.ctx = null; this.sources = new Set(); this.next = 0; this.chain = Promise.resolve(); this.turn = -1; this.dead = new Set(); this.endTimer = null; this.doneTurns = new Set(); this.onEnded = null; }
+  constructor() { this.speaking = 0; this.ctx = null; this.sources = new Set(); this.next = 0; this.chain = Promise.resolve(); this.turn = -1; this.dead = new Set(); this.endTimer = null; this.doneTurns = new Set(); this.onEnded = null; }
   ensure() { if (!this.ctx) this.ctx = new AudioContext(); if (this.ctx.state === 'suspended') this.ctx.resume(); return this.ctx; }
   async decode(meta, buf) {
     const ctx = this.ensure();
-    if (meta.format === 'pcm16') {
-      const i16 = new Int16Array(buf.byteLength % 2 ? buf.slice(0, buf.byteLength - 1) : buf);
-      const ab = ctx.createBuffer(1, i16.length, meta.sample_rate);
-      const ch = ab.getChannelData(0); for (let i = 0; i < i16.length; i++) ch[i] = i16[i] / 32768; return ab;
+    if (meta.format === 'pcm16') {  // server-normalised: PCM16 little-endian mono at meta.sample_rate
+      const n = buf.byteLength >> 1, dv = new DataView(buf);
+      const ab = ctx.createBuffer(1, Math.max(1, n), meta.sample_rate || 16000);  // Web Audio resamples to ctx rate
+      const ch = ab.getChannelData(0); for (let i = 0; i < n; i++) ch[i] = dv.getInt16(i * 2, true) / 32768; return ab;
     }
     return await ctx.decodeAudioData(buf.slice(0));
   }
@@ -215,22 +217,36 @@ class Player {
       if (this.dead.has(meta.turn)) return;
       let ab; try { ab = await this.decode(meta, buf); } catch (e) { logEv('audio decode error ' + e); return; }
       if (this.dead.has(meta.turn)) return;
+      if (window.__vaoTap) try { window.__vaoTap(ab.getChannelData(0), ab.sampleRate, meta); } catch { }
       const ctx = this.ctx; const src = ctx.createBufferSource(); src.buffer = ab; src.connect(ctx.destination);
       const at = Math.max(ctx.currentTime + 0.02, this.next); src.start(at); this.next = at + ab.duration;
       this.turn = meta.turn; this.sources.add(src); setState('speaking');
       src.onended = () => { this.sources.delete(src); this.checkEnd(); };
     });
   }
+  speak(meta) {  // browser speechSynthesis fallback / provider
+    if (this.dead.has(meta.turn) || !window.speechSynthesis) { if (!window.speechSynthesis) logEv('speechSynthesis not supported in this browser'); return; }
+    const u = new SpeechSynthesisUtterance(meta.text);
+    u.lang = meta.lang || 'en-IN'; u.rate = meta.rate || 1; u.pitch = Math.max(0, Math.min(2, 1 + (meta.pitch || 0) / 10));
+    const vs = speechSynthesis.getVoices(), base = u.lang.split('-')[0];
+    u.voice = vs.find(v => v.lang === u.lang) || vs.find(v => v.lang.replace('_', '-').startsWith(base)) || null;
+    if (!u.voice && vs.length) logEv(`no ${u.lang} voice on this device - using default voice`);
+    this.turn = meta.turn; this.speaking++; setState('speaking');
+    u.onend = u.onerror = () => { this.speaking = Math.max(0, this.speaking - 1); this.checkEnd(); };
+    if (window.__vaoTap) try { window.__vaoTap(null, 0, meta); } catch { }
+    speechSynthesis.speak(u);
+  }
   checkEnd() {
     clearTimeout(this.endTimer);
     this.endTimer = setTimeout(() => {
-      if (!this.sources.size && this.doneTurns.has(this.turn)) this.onEnded?.(this.turn);
+      if (!this.sources.size && !this.speaking && this.doneTurns.has(this.turn)) this.onEnded?.(this.turn);
     }, 120);
   }
   markDone(turn) { this.doneTurns.add(turn); this.checkEnd(); }
   stop(turn) {
     if (turn !== undefined) this.dead.add(turn);
     for (const s of this.sources) { try { s.stop(); } catch { } }
+    if (window.speechSynthesis && this.speaking) { speechSynthesis.cancel(); this.speaking = 0; }
     this.sources.clear(); this.next = 0;
   }
   async playTest(r) { this.enqueue({ turn: -99, format: r.format, sample_rate: r.sample_rate }, Uint8Array.from(atob(r.audio_b64), c => c.charCodeAt(0)).buffer); }
@@ -261,7 +277,7 @@ class Call {
     };
     this.readyTimer = setTimeout(() => { if (!this.ready) callMsg('Still connecting to the call server… (a sleeping Render free instance can take ~30-60 s to wake up)', 'warn'); }, 8000);
     player.onEnded = turn => { this.sendJSON({ type: 'playback_ended', turn }); setState('listening'); };
-    try { await this.startMic(); if (this.ready && !$('#callMsg').classList.contains('err')) callMsg('Connected - speak now (or type below).', 'ok'); } catch (err) { const t = micErrorText(err); this.micError = t; appendMsg('🎙 ' + t, 'warn'); addMsg('err', t); }
+    try { await this.startMic(); if (this.ready && !this.hasNotes && !$('#callMsg').classList.contains('err')) callMsg('Connected - speak now (or type below).', 'ok'); } catch (err) { const t = micErrorText(err); this.micError = t; appendMsg('🎙 ' + t, 'warn'); addMsg('err', t); }
   }
   async startMic() {
     if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) throw Object.assign(new Error('this page is not on HTTPS (or the browser has no mic API), so the browser blocks microphone access'), { name: 'InsecureContext' });
@@ -286,14 +302,15 @@ class Call {
         if (!(m.missing_keys || []).length && !this.micError) callMsg((this.stream ? 'Connected - speak now (or type below).' : 'Connected - type a message below.'), 'ok');
         setState('listening'); $('#stackInfo').textContent = `${m.profile.stt} → ${m.profile.llm} → ${m.profile.tts} · ${m.profile.language}`;
         kv({ VAD: m.vad_backend, Denoise: m.denoise_backend, 'Speaker ID': m.speaker_embedder, Language: m.profile.language });
-        (m.warnings || []).forEach(w => addMsg('err', '⚠ ' + w)); addMsg('sys', 'Call started – speak or type.'); break;
+        (m.warnings || []).forEach(w => addMsg('err', '⚠ ' + w));
+        this.hasNotes = !!(m.notes || []).length || !!(m.missing_keys || []).length; (m.notes || []).forEach(n => { addMsg('sys', 'ℹ ' + n); appendMsg('ℹ ' + n, 'warn'); }); addMsg('sys', 'Call started – speak or type.'); break;
       case 'level': meter(m); break;
       case 'vad': if (m.state === 'speech_start') { setState('user'); this.turnStart = Date.now(); } logEv('vad ' + m.state + (m.speech_ms ? ` ${m.speech_ms}ms` : '')); break;
       case 'transcript': addMsg('user', m.text, m.language ? `${m.language}${m.confidence ? ' · conf ' + (+m.confidence).toFixed(2) : ''}` : ''); break;
       case 'state': if (m.state !== 'listening' || !player.sources.size) setState(m.state); break;
       case 'llm_delta': { let el = this.botMsg[m.turn]; if (!el) el = this.botMsg[m.turn] = addMsg('bot', ''); el.firstChild.textContent += m.text; scrollT(); break; }
       case 'assistant_done': { let el = this.botMsg[m.turn] || (this.botMsg[m.turn] = addMsg('bot', m.text)); if (m.text) el.firstChild.textContent = m.text; if (m.interrupted) { el.classList.add('interrupted'); el.querySelector('.meta').textContent = '✋ interrupted'; } player.markDone(m.turn); break; }
-      case 'audio': this.pendingMeta = m; break;
+      case 'audio': if (m.format === 'speech' || m.binary === false) player.speak(m); else this.pendingMeta = m; break;
       case 'interrupt': player.stop(m.turn); addMsg('sys', `✋ bot interrupted (${m.reason}${m.similarity != null ? ', voice sim ' + m.similarity.toFixed(2) : ''})`); setState('user'); break;
       case 'metrics': if (!m.empty) addMetrics(m); break;
       case 'sentiment': addSentiment(m); break;

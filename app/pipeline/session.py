@@ -17,7 +17,7 @@ from ..audio.vad import EnergyVAD, TurnDetector
 from ..languages import supports
 from ..models import BotProfile
 from ..providers import Credentials, ProviderError, TTSOptions, get_provider
-from ..providers.base import wav_info
+from ..audio.codec import AudioFormatError, duration_s, normalize
 from .chunker import SentenceChunker
 
 log = logging.getLogger("voice.session")
@@ -88,15 +88,8 @@ class CallSession:
         return self.bot_speaking or (self.response_task is not None and not self.response_task.done())
 
     def _extend_speaking(self, chunk):
-        if chunk.format == "pcm16":
-            dur = len(chunk.data) / 2 / chunk.sample_rate
-        elif chunk.format == "wav":
-            info = wav_info(chunk.data)
-            dur = len(info[1]) / 2 / info[0] if info else len(chunk.data) / 32000
-        else:  # mp3 ~ 128 kbps
-            dur = len(chunk.data) / 16000
         now = time.monotonic()
-        self._speak_until = max(self._speak_until, now) + dur
+        self._speak_until = max(self._speak_until, now) + duration_s(chunk)
         self.bot_speaking = True
 
     # ------------------------------------------------------------------ lifecycle
@@ -109,7 +102,11 @@ class CallSession:
             if not supports("tts", self.p.tts.provider, lang):
                 warn.append(f"TTS '{self.p.tts.provider}' has no {lang} support")
         missing = self.missing_credentials()
-        await self.send({"type": "ready", "missing_keys": missing, "vad_backend": self.vad.backend, "denoise_backend": self.denoiser.backend,
+        notes = []
+        if self.p.tts.provider == "mock":
+            notes.append("This bot uses Mock TTS: you will hear placeholder TONES, not a voice. Pick the "
+                         "'Demo - real voice (no keys)' bot or a real TTS provider to hear speech.")
+        await self.send({"type": "ready", "missing_keys": missing, "notes": notes, "vad_backend": self.vad.backend, "denoise_backend": self.denoiser.backend,
                          "speaker_embedder": self.speaker.embedder.name, "warnings": warn,
                          "profile": {"name": self.p.name, "language": lang, "stt": self.p.stt.provider,
                                      "llm": self.p.llm.provider, "tts": self.p.tts.provider}})
@@ -294,15 +291,24 @@ class CallSession:
             if sent is None:
                 return
             t0 = time.perf_counter()
-            chunk = await self.tts.synthesize(sent, lang, self.p.tts.voice, self._tts_opts(), self.p.tts.model)
+            raw = await self.tts.synthesize(sent, lang, self.p.tts.voice, self._tts_opts(), self.p.tts.model)
+            try:
+                chunk = await asyncio.to_thread(normalize, raw)
+            except AudioFormatError as e:
+                raise ProviderError(f"TTS audio could not be decoded: {e}") from None
             dt = _ms(t0)
             if seq == 0:
                 metrics["tts_first_ms"] = dt
                 metrics["e2e_first_audio_ms"] = _ms(t_ref)
             metrics["tts_total_ms"] = metrics.get("tts_total_ms", 0) + dt
             self._extend_speaking(chunk)
-            await self.send_audio({"type": "audio", "turn": turn, "seq": seq, "format": chunk.format,
-                                   "sample_rate": chunk.sample_rate, "text": sent}, chunk.data)
+            meta = {"type": "audio", "turn": turn, "seq": seq, "format": chunk.format,
+                    "sample_rate": chunk.sample_rate, "text": sent}
+            if chunk.format == "speech":  # browser speechSynthesis: text only, no binary frame follows
+                await self.send({**meta, "lang": lang, "rate": self.p.tts.speed, "pitch": self.p.tts.pitch,
+                                 "binary": False})
+            else:
+                await self.send_audio({**meta, "binary": True}, chunk.data)
             seq += 1
 
     async def _respond(self, turn: int, stt_ms: int | None, t_ref: float):

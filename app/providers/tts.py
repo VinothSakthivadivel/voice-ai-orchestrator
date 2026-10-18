@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape  # noqa: E402
 
 from ..languages import ELEVENLABS_DEFAULT_VOICE, default_voice, provider_code
 from . import creds as C
@@ -57,7 +57,15 @@ class SarvamTTS(TTSProvider):
         audios = r.json().get("audios") or []
         if not audios:
             raise ProviderError("Sarvam TTS returned no audio")
-        return AudioChunk(base64.b64decode("".join(audios)), "wav", 22050)
+        if len(audios) == 1:
+            return AudioChunk(base64.b64decode(audios[0]), "wav", 22050)
+        # several base64 WAVs: decode each separately (joining base64 strings corrupts the audio)
+        from ..audio.codec import parse_wav
+        pcm, rate = b"", 22050
+        for a in audios:
+            p, rate = parse_wav(base64.b64decode(a))
+            pcm += p
+        return AudioChunk(pcm, "pcm16", rate)
 
 
 @register
@@ -100,7 +108,8 @@ class AzureTTS(TTSProvider):
 
     async def synthesize(self, text, language, voice, opts, model=None):
         lang = _lang("azure", language)
-        voice = voice or default_voice("azure", language)
+        if not voice or (voice.count("-") >= 2 and not voice.startswith(lang)):  # voice from another language
+            voice = default_voice("azure", language)
         url = f"https://{self.cred('region')}.tts.speech.microsoft.com/cognitiveservices/v1"
         r = await self.http.post(url, content=azure_ssml(text, lang, voice, opts).encode("utf-8"),
                                  headers={"Ocp-Apim-Subscription-Key": self.cred("key"),
@@ -175,7 +184,8 @@ class OpenAITTS(TTSProvider):
     async def synthesize(self, text, language, voice, opts, model=None):
         _lang("openai", language)
         m = model or self.meta.default_model
-        body = {"model": m, "voice": voice or "coral", "input": text, "response_format": "wav",
+        # "pcm" = raw 24 kHz 16-bit LE mono; avoids streaming-WAV headers with bogus sizes
+        body = {"model": m, "voice": voice or "coral", "input": text, "response_format": "pcm",
                 "speed": _clamp(opts.speed, 0.25, 4.0)}
         if m == "gpt-4o-mini-tts" and opts.style and opts.style != "neutral":
             body["instructions"] = EMOTION_INSTRUCTIONS.get(opts.style, f"Speak in a {opts.style} tone.")
@@ -183,4 +193,88 @@ class OpenAITTS(TTSProvider):
         r = await self.http.post(f"{base}/audio/speech", json=body,
                                  headers={"Authorization": f"Bearer {self.cred('api_key')}"})
         await self._check(r)
-        return AudioChunk(r.content, "wav", 24000)
+        return AudioChunk(r.content, "pcm16", 24000)
+
+
+EDGE_VOICES = {
+    "hi-IN": ["hi-IN-SwaraNeural", "hi-IN-MadhurNeural"], "bn-IN": ["bn-IN-TanishaaNeural", "bn-IN-BashkarNeural"],
+    "ta-IN": ["ta-IN-PallaviNeural", "ta-IN-ValluvarNeural"], "te-IN": ["te-IN-ShrutiNeural", "te-IN-MohanNeural"],
+    "mr-IN": ["mr-IN-AarohiNeural", "mr-IN-ManoharNeural"], "gu-IN": ["gu-IN-DhwaniNeural", "gu-IN-NiranjanNeural"],
+    "kn-IN": ["kn-IN-SapnaNeural", "kn-IN-GaganNeural"], "ml-IN": ["ml-IN-SobhanaNeural", "ml-IN-MidhunNeural"],
+    "ur-IN": ["ur-IN-GulNeural", "ur-IN-SalmanNeural"], "en-IN": ["en-IN-NeerjaNeural", "en-IN-PrabhatNeural",
+                                                                    "en-IN-NeerjaExpressiveNeural"],
+    "ne-IN": ["ne-NP-HemkalaNeural", "ne-NP-SagarNeural"],
+}
+GTTS_LANGS = {"hi-IN": "hi", "bn-IN": "bn", "ta-IN": "ta", "te-IN": "te", "mr-IN": "mr", "gu-IN": "gu",
+              "kn-IN": "kn", "ml-IN": "ml", "ur-IN": "ur", "en-IN": "en", "ne-IN": "ne", "pa-IN": "pa"}
+
+
+def _speech_chunk(text: str, language: str) -> AudioChunk:
+    """Last-resort: ask the browser to speak the text with its own speechSynthesis voices."""
+    return AudioChunk(text.encode("utf-8"), "speech", 0)
+
+
+@register
+class FreeTTS(TTSProvider):
+    meta = ProviderMeta("tts", "free", "Free voices - no key (Microsoft Edge neural → Google Translate → browser)", [],
+                        features=["no-key", "real-speech", "speed", "pitch"],
+                        notes="Uses the public Microsoft Edge read-aloud voices (edge-tts), then gTTS, then the "
+                              "browser's speechSynthesis. Unofficial endpoints: fine for demos, not an SLA-backed "
+                              "production service.")
+
+    async def _edge(self, text, voice, opts):
+        import edge_tts  # type: ignore
+
+        rate = f"{(_clamp(opts.speed, 0.5, 2.0) - 1) * 100:+.0f}%"
+        pitch = f"{int(_clamp(opts.pitch, -10, 10) * 8):+d}Hz"
+        comm = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, connect_timeout=6, receive_timeout=20)
+        data = bytearray()
+        async for ch in comm.stream():
+            if ch["type"] == "audio":
+                data += ch["data"]
+        if not data:
+            raise ProviderError("edge-tts returned no audio")
+        return AudioChunk(bytes(data), "mp3", 24000)
+
+    async def _gtts(self, text, lang):
+        from gtts import gTTS  # type: ignore
+        import io
+
+        def run():
+            buf = io.BytesIO()
+            gTTS(text, lang=lang, tld="co.in").write_to_fp(buf)
+            return buf.getvalue()
+
+        data = await asyncio.wait_for(asyncio.to_thread(run), 15)
+        return AudioChunk(data, "mp3", 24000)
+
+    async def synthesize(self, text, language, voice, opts, model=None):
+        errors = []
+        voices = EDGE_VOICES.get(language)
+        if voices and (model in (None, "", "edge")):
+            v = voice if voice and voice.endswith("Neural") and voice[:5] == voices[0][:5] else voices[0]
+            try:
+                return await asyncio.wait_for(self._edge(text, v, opts), 25)
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"edge: {type(e).__name__}")
+        g = GTTS_LANGS.get(language)
+        if g and model in (None, "", "edge", "gtts"):
+            try:
+                return await self._gtts(text, g)
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"gtts: {type(e).__name__}")
+        if errors:
+            import logging
+            logging.getLogger("voice.tts").warning("free TTS fell back to browser speech (%s)", ", ".join(errors))
+        return _speech_chunk(text, language)
+
+
+@register
+class BrowserTTS(TTSProvider):
+    meta = ProviderMeta("tts", "browser", "Browser speechSynthesis (device voices, no key)", [],
+                        features=["no-key", "zero-server-cost", "speed", "pitch"],
+                        notes="Speech is generated by the user's browser/OS; available languages depend on the device "
+                              "(Chrome/Android/Windows usually have hi-IN, en-IN; many have ta/te/bn/mr...).")
+
+    async def synthesize(self, text, language, voice, opts, model=None):
+        return _speech_chunk(text, language)

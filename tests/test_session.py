@@ -157,3 +157,24 @@ async def test_unsupported_language_warning(wire):
     s.p.language = "ta-IN"
     await s.start()
     assert wire.of("ready")[0]["warnings"]
+
+
+async def test_speech_chunks_sent_without_binary_and_normalised_pcm(wire, monkeypatch):
+    s = make(wire, tts={"provider": "browser"})
+    await s.start()
+    await s.on_text("hello")
+    await wait_for(lambda: wire.of("metrics"))
+    a = wire.of("audio")
+    assert a and all(m["format"] == "speech" and m["binary"] is False for m in a) and not wire.bytes
+    assert s.bot_speaking  # estimated duration keeps barge-in armed
+    await s.close()
+
+    w2 = type(wire)()
+    s2 = make(w2)  # mock TTS emits WAV -> must arrive as raw PCM16, header stripped
+    await s2.start()
+    await s2.on_text("hi")
+    await wait_for(lambda: w2.of("metrics"))
+    assert all(m["format"] == "pcm16" and m["binary"] for m in w2.of("audio"))
+    assert all(not b.startswith(b"RIFF") and len(b) % 2 == 0 for b in w2.bytes)
+    assert w2.of("ready")[0]["notes"]  # mock TTS warns that it plays tones
+    await s2.close()

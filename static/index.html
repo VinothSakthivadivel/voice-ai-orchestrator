@@ -90,7 +90,7 @@
     </div>
     <div class="card">
       <h3 id="botFormTitle">Edit bot</h3>
-      <form id="botForm" class="form">
+      <form id="botForm" class="form" novalidate>
         <input type="hidden" name="id" />
         <fieldset><legend>General</legend>
           <label>Name <input name="name" required /></label>
@@ -119,7 +119,7 @@
           <label>Speed <input type="number" step="0.05" min="0.25" max="4" name="tts.speed" /></label>
           <label>Pitch (-10..10) <input type="number" step="1" min="-10" max="10" name="tts.pitch" /></label>
           <label>Emotion / style <input name="tts.style" list="styles" placeholder="neutral" /><datalist id="styles"><option>cheerful</option><option>empathetic</option><option>calm</option><option>friendly</option><option>excited</option><option>serious</option><option>sad</option><option>customerservice</option></datalist></label>
-          <label>Style degree (Azure) <input type="number" step="0.1" min="0.01" max="2" name="tts.style_degree" /></label>
+          <label>Style degree (Azure) <input type="number" step="any" min="0.01" max="2" name="tts.style_degree" /></label>
           <label>Stability (ElevenLabs) <input type="number" step="0.05" min="0" max="1" name="tts.stability" /></label>
           <label>Similarity (ElevenLabs) <input type="number" step="0.05" min="0" max="1" name="tts.similarity" /></label>
           <label>Style exaggeration (ElevenLabs) <input type="number" step="0.05" min="0" max="1" name="tts.style_exaggeration" /></label>
