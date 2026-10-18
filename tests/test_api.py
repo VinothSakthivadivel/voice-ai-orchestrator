@@ -79,3 +79,51 @@ def test_log_redaction_keeps_access_log_args(monkeypatch):
     msg = rec.getMessage()
     assert "AIzaSy" not in msg and "200" in msg
     assert "sk-abc" not in redact("token sk-abcdefghijklmnopqrstuvwxyz used")
+
+
+def test_head_requests_allowed():
+    c = TestClient(app)
+    assert c.head("/").status_code == 200
+    assert c.head("/health").status_code == 200
+
+
+def test_auth_check_endpoint(monkeypatch):
+    monkeypatch.setenv("APP_ACCESS_TOKEN", "tok123")
+    c = TestClient(app)
+    assert c.get("/api/info").json()["auth_required"] is True  # public, so the UI can show the token prompt
+    assert c.get("/api/auth/check").status_code == 401
+    assert c.get("/api/auth/check", headers={"X-Access-Token": "nope"}).status_code == 401
+    assert c.get("/api/auth/check", headers={"X-Access-Token": "tok123"}).json()["ok"]
+    with c.websocket_connect("/ws/call") as ws:
+        m = ws.receive_json()
+        assert m["code"] == "auth" and "APP_ACCESS_TOKEN" in m["message"]
+    with c.websocket_connect("/ws/call?token=tok123") as ws:
+        ws.send_json({"type": "start", "profile_id": "demo-mock"})
+        assert ws.receive_json()["type"] == "ready"
+
+
+def test_store_reseeds_empty_or_corrupt_file(tmp_path):
+    from app.store import ProfileStore
+
+    st = ProfileStore(str(tmp_path))
+    assert {"demo-mock", "sarvam-hindi", "azure-tamil", "fast-english"} <= {b.id for b in st.list()}
+    st.file.write_text("")  # empty file, as on some fresh disks
+    assert any(b.id == "demo-mock" for b in st.list())
+    st.file.write_text("{not json")
+    assert st.get("demo-mock") is not None
+    st.file.write_text('{"x": {"name": "kept"}}')
+    st2 = ProfileStore(str(tmp_path))
+    ids = {b.id for b in st2.list()}
+    assert "demo-mock" in ids and len(ids) >= 2
+
+
+def test_ws_reports_missing_keys_at_start(monkeypatch):
+    for k in ("SARVAM_API_KEY",):
+        monkeypatch.delenv(k, raising=False)
+    c = TestClient(app)
+    with c.websocket_connect("/ws/call") as ws:
+        ws.send_json({"type": "start", "profile_id": "sarvam-hindi"})
+        ready = ws.receive_json()
+        assert ready["type"] == "ready" and {m["layer"] for m in ready["missing_keys"]} == {"stt", "llm", "tts"}
+        err = ws.receive_json()
+        assert err["type"] == "error" and err["code"] == "missing_key" and "SARVAM_API_KEY" in err["message"]

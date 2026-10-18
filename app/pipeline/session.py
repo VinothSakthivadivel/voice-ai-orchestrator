@@ -108,14 +108,28 @@ class CallSession:
                 warn.append(f"STT '{self.p.stt.provider}' has no {lang} support")
             if not supports("tts", self.p.tts.provider, lang):
                 warn.append(f"TTS '{self.p.tts.provider}' has no {lang} support")
-        await self.send({"type": "ready", "vad_backend": self.vad.backend, "denoise_backend": self.denoiser.backend,
+        missing = self.missing_credentials()
+        await self.send({"type": "ready", "missing_keys": missing, "vad_backend": self.vad.backend, "denoise_backend": self.denoiser.backend,
                          "speaker_embedder": self.speaker.embedder.name, "warnings": warn,
                          "profile": {"name": self.p.name, "language": lang, "stt": self.p.stt.provider,
                                      "llm": self.p.llm.provider, "tts": self.p.tts.provider}})
-        if self.p.llm.greeting:
+        for m in missing:
+            await self.send({"type": "error", "layer": m["layer"], "code": "missing_key",
+                             "message": f"{m['label']}: missing {', '.join(m['fields'])}. Add it in the API Keys tab "
+                                        f"(or set {', '.join(m['env'])} on the server)."})
+        if self.p.llm.greeting and not any(m["layer"] == "tts" for m in missing):
             self.history.append({"role": "assistant", "content": self.p.llm.greeting})
             await self.send({"type": "assistant_done", "text": self.p.llm.greeting, "turn": 0})
             self.response_task = asyncio.create_task(self._speak_only(self.p.llm.greeting))
+
+    def missing_credentials(self) -> list[dict]:
+        out = []
+        for layer, prov in (("stt", self.stt), ("llm", self.llm), ("tts", self.tts)):
+            miss = [c for c in prov.meta.credentials if c.required and not self.creds.get(prov.meta, c.name)]
+            if miss:
+                out.append({"layer": layer, "provider": prov.meta.name, "label": prov.meta.label,
+                            "fields": [c.name for c in miss], "env": [c.env for c in miss]})
+        return out
 
     async def close(self):
         self.closed = True

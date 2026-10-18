@@ -41,7 +41,7 @@ def require_token(x_access_token: str | None = Header(None), token: str | None =
         raise HTTPException(401, "Access token required (APP_ACCESS_TOKEN is set on the server)")
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {"status": "ok", "version": __version__, "uptime_s": int(time.time() - STARTED),
             "active_sessions": len(ACTIVE)}
@@ -57,6 +57,11 @@ async def info():
             env_configured[f"{m.layer}:{m.name}"] = bool(req) and ALLOW_ENV_KEYS and all(os.environ.get(c.env) for c in req)
     return {"version": __version__, "auth_required": bool(access_token()), "allow_env_keys": ALLOW_ENV_KEYS,
             "env_configured": env_configured}
+
+
+@app.get("/api/auth/check", dependencies=[Depends(require_token)])
+async def auth_check():
+    return {"ok": True}
 
 
 @app.get("/api/providers", dependencies=[Depends(require_token)])
@@ -144,11 +149,14 @@ async def test_provider(req: TestReq):
 async def ws_call(ws: WebSocket):
     await ws.accept()
     if not check_token(ws.query_params.get("token")):
-        await ws.send_json({"type": "error", "layer": "auth", "message": "invalid access token"})
+        await ws.send_json({"type": "error", "layer": "auth", "code": "auth",
+                            "message": "Access token missing or invalid. This deployment has APP_ACCESS_TOKEN set - "
+                                       "enter the token in the banner at the top of the page."})
         await ws.close(code=4401)
         return
     if len(ACTIVE) >= MAX_SESSIONS:
-        await ws.send_json({"type": "error", "layer": "server", "message": "server busy"})
+        await ws.send_json({"type": "error", "layer": "server", "code": "busy",
+                            "message": f"Server busy: {MAX_SESSIONS} calls already active, try again shortly."})
         await ws.close(code=4429)
         return
     session: CallSession | None = None
@@ -220,7 +228,7 @@ async def ws_call(ws: WebSocket):
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def index():
     return FileResponse(STATIC / "index.html")
 

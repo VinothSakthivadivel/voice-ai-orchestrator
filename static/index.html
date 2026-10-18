@@ -17,10 +17,18 @@
     <button data-tab="langs">Languages</button>
     <button data-tab="providers">Providers</button>
   </nav>
-  <div id="authbox" class="hidden"><input id="token" type="password" placeholder="Access token" /><button id="tokenSave">Unlock</button></div>
+  <div id="authbox" class="hidden"><button id="tokenChange" class="small-btn">🔑 Change access token</button></div>
 </header>
 
 <main>
+<div id="authPanel" class="banner hidden">
+  <h3>🔒 Access token required</h3>
+  <p>This deployment is protected: the server has <code>APP_ACCESS_TOKEN</code> set (Render → your service → Environment).
+     Enter that token to load bot profiles and start calls. It is stored only in this browser.</p>
+  <form id="tokenForm" class="row"><input id="token" type="password" placeholder="Paste APP_ACCESS_TOKEN" autocomplete="off" /><button class="primary">Unlock</button></form>
+  <div id="tokenErr" class="errline"></div>
+</div>
+<div id="bootErr" class="banner err hidden"></div>
 <!-- ============ CONSOLE ============ -->
 <section id="tab-console" class="tab active">
   <div class="grid3">
@@ -31,6 +39,7 @@
         <button id="callBtn" class="primary big">▶ Start call</button>
         <button id="hangBtn" class="danger big" disabled>■ End</button>
       </div>
+      <div id="callMsg" class="callmsg hidden"></div>
       <div class="statebar"><span id="statePill" class="pill idle">idle</span><span id="stackInfo" class="muted small"></span></div>
       <div class="meter"><div id="meterBar"></div><div id="meterFloor"></div></div>
       <div class="small muted" id="meterTxt">mic: –</div>

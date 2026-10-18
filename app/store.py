@@ -46,8 +46,21 @@ class ProfileStore:
         data_dir.mkdir(parents=True, exist_ok=True)
         self.file = data_dir / "bots.json"
         self._lock = threading.Lock()
-        if not self.file.exists():
-            self._write({p.id: p.model_dump() for p in default_profiles()})
+        self.ensure_defaults()
+
+    def ensure_defaults(self):
+        """Seed built-in profiles when the file is missing, empty or corrupt (fresh Render instance)."""
+        with self._lock:
+            d = self._read()
+            if not d or "demo-mock" not in d:
+                fresh = not d
+                for p in default_profiles():
+                    if fresh or p.id == "demo-mock":
+                        d.setdefault(p.id, p.model_dump())
+                try:
+                    self._write(d)
+                except OSError:
+                    pass
 
     def _read(self) -> dict:
         try:
@@ -61,10 +74,22 @@ class ProfileStore:
         tmp.replace(self.file)
 
     def list(self) -> list[BotProfile]:
-        return [BotProfile(**v) for v in self._read().values()]
+        d = self._read()
+        if not d:
+            self.ensure_defaults()
+            d = self._read() or {p.id: p.model_dump() for p in default_profiles()}
+        out = []
+        for v in d.values():
+            try:
+                out.append(BotProfile(**v))
+            except Exception:  # skip a corrupt entry rather than breaking the UI
+                continue
+        return out
 
     def get(self, pid: str) -> BotProfile | None:
         v = self._read().get(pid)
+        if not v:
+            v = next((p.model_dump() for p in default_profiles() if p.id == pid), None)
         return BotProfile(**v) if v else None
 
     def save(self, p: BotProfile) -> BotProfile:

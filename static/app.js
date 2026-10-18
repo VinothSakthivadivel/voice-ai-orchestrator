@@ -6,9 +6,22 @@ const token = () => localStorage.getItem('vao_token') || '';
 
 async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', 'X-Access-Token': token(), ...(opts.headers || {}) } });
-  if (r.status === 401) { $('#authbox').classList.remove('hidden'); throw new Error('Access token required'); }
+  if (r.status === 401) { showAuth(token() ? 'The saved access token was rejected by the server. Enter the correct APP_ACCESS_TOKEN.' : ''); const e = new Error('Access token required'); e.auth = true; throw e; }
   if (!r.ok) throw new Error((await r.text()).slice(0, 300));
   return r.json();
+}
+function showAuth(msg = '') { $('#authPanel').classList.remove('hidden'); $('#tokenErr').textContent = msg; $('#token').focus(); }
+function callMsg(text, kind = 'err') { const el = $('#callMsg'); if (!text) { el.className = 'callmsg hidden'; return; } el.className = 'callmsg ' + kind; el.textContent = text; }
+function appendMsg(text, kind = 'err') {
+  const el = $('#callMsg'), cur = el.classList.contains('hidden') || /^(Connecting|Connected|Still connecting)/.test(el.textContent) ? '' : el.textContent;
+  callMsg(cur ? cur + '\n' + text : text, cur && el.classList.contains('err') ? 'err' : kind);
+}
+function micErrorText(err) {
+  const n = err && err.name;
+  if (n === 'NotAllowedError' || n === 'SecurityError') return 'Microphone permission was denied. Click the 🔒/camera icon in the address bar, allow the microphone for this site, then start the call again. (You can still type messages.)';
+  if (n === 'NotFoundError' || n === 'OverconstrainedError') return 'No microphone was found. Plug in / enable a mic, or type messages instead.';
+  if (n === 'NotReadableError') return 'The microphone is in use by another app (Zoom/Teams?) or blocked by the OS. Close it and retry.';
+  return 'Microphone unavailable: ' + (err && err.message || err) + ' (You can still type messages.)';
 }
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -230,6 +243,7 @@ class Call {
   constructor(bot) { this.bot = bot; this.ws = null; this.pendingMeta = null; this.botMsg = {}; this.metrics = []; this.sent = []; this.turnStart = Date.now(); }
   sendJSON(o) { if (this.ws?.readyState === 1) this.ws.send(JSON.stringify(o)); }
   async start() {
+    this.ready = false;
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     this.ws = new WebSocket(`${proto}://${location.host}/ws/call?token=${encodeURIComponent(token())}`);
     this.ws.binaryType = 'arraybuffer';
@@ -237,13 +251,25 @@ class Call {
     for (const [k, v] of Object.entries(liveOverrides())) Object.assign(profile[k], v);
     this.ws.onopen = () => { this.sendJSON({ type: 'start', profile, keys: loadKeys() }); logEv('ws connected'); };
     this.ws.onmessage = e => this.onMsg(e);
-    this.ws.onclose = e => { logEv('ws closed ' + e.code); this.cleanup(); };
+    this.ws.onerror = () => logEv('ws error');
+    this.ws.onclose = e => {
+      logEv('ws closed ' + e.code);
+      if (e.code === 4401) { callMsg('Call rejected: access token missing or invalid. Enter the APP_ACCESS_TOKEN in the banner at the top.'); showAuth('The server rejected the access token.'); }
+      else if (e.code === 4429) callMsg('Server busy: too many active calls. Try again in a moment.');
+      else if (!this.ready && !this.gotError) callMsg(`Could not connect to the call server (WebSocket ${proto}://${location.host}/ws/call, close code ${e.code}). If the service was asleep on Render's free plan, wait ~30 s and try again; check that no proxy/firewall blocks WebSockets.`);
+      this.cleanup();
+    };
+    this.readyTimer = setTimeout(() => { if (!this.ready) callMsg('Still connecting to the call server… (a sleeping Render free instance can take ~30-60 s to wake up)', 'warn'); }, 8000);
     player.onEnded = turn => { this.sendJSON({ type: 'playback_ended', turn }); setState('listening'); };
-    try { await this.startMic(); } catch (err) { addMsg('err', 'Microphone unavailable: ' + err.message + ' — you can still type messages.'); }
+    try { await this.startMic(); if (this.ready && !$('#callMsg').classList.contains('err')) callMsg('Connected - speak now (or type below).', 'ok'); } catch (err) { const t = micErrorText(err); this.micError = t; appendMsg('🎙 ' + t, 'warn'); addMsg('err', t); }
   }
   async startMic() {
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) throw Object.assign(new Error('this page is not on HTTPS (or the browser has no mic API), so the browser blocks microphone access'), { name: 'InsecureContext' });
     this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) throw Object.assign(new Error('this page is not on HTTPS (or the browser has no mic API), so the browser blocks microphone access'), { name: 'InsecureContext' });
     this.ctx = new AudioContext();
+    if (this.ctx.state === 'suspended') await this.ctx.resume().catch(() => { });
+    if (!this.ctx.audioWorklet) throw new Error('this browser does not support AudioWorklet - use a recent Chrome, Edge, Firefox or Safari');
     await this.ctx.audioWorklet.addModule('/static/capture-worklet.js');
     const src = this.ctx.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(this.ctx, 'capture-processor');
@@ -256,7 +282,9 @@ class Call {
     if (e.data instanceof ArrayBuffer) { const m = this.pendingMeta; this.pendingMeta = null; if (m) player.enqueue(m, e.data); return; }
     const m = JSON.parse(e.data);
     switch (m.type) {
-      case 'ready': setState('listening'); $('#stackInfo').textContent = `${m.profile.stt} → ${m.profile.llm} → ${m.profile.tts} · ${m.profile.language}`;
+      case 'ready': this.ready = true; clearTimeout(this.readyTimer);
+        if (!(m.missing_keys || []).length && !this.micError) callMsg((this.stream ? 'Connected - speak now (or type below).' : 'Connected - type a message below.'), 'ok');
+        setState('listening'); $('#stackInfo').textContent = `${m.profile.stt} → ${m.profile.llm} → ${m.profile.tts} · ${m.profile.language}`;
         kv({ VAD: m.vad_backend, Denoise: m.denoise_backend, 'Speaker ID': m.speaker_embedder, Language: m.profile.language });
         (m.warnings || []).forEach(w => addMsg('err', '⚠ ' + w)); addMsg('sys', 'Call started – speak or type.'); break;
       case 'level': meter(m); break;
@@ -270,18 +298,28 @@ class Call {
       case 'metrics': if (!m.empty) addMetrics(m); break;
       case 'sentiment': addSentiment(m); break;
       case 'speaker': logEv(`speaker ${m.event}${m.similarity != null ? ' sim=' + m.similarity : ''}`); if (m.event === 'rejected') addMsg('sys', `🔇 ignored background/other speaker (sim ${m.similarity})`); if (m.event === 'enrolling') addMsg('sys', `🎙 Enrolling your voice – speak normally for ~${m.seconds}s`); break;
-      case 'error': addMsg('err', `${m.layer?.toUpperCase() || ''} error: ${m.message}`); logEv('error ' + m.message); break;
+      case 'error':
+        if (m.code === 'auth') { this.gotError = true; showAuth('The server rejected the access token.'); callMsg('Call rejected: ' + m.message); }
+        else if (m.code === 'missing_key') appendMsg('🔑 ' + m.message + ' Or pick the "Demo (no keys, mock providers)" bot.');
+        else if (m.code === 'busy') { this.gotError = true; callMsg(m.message); }
+        else if (!this.ready) callMsg(`${m.layer?.toUpperCase() || ''} error: ${m.message}`);
+        addMsg('err', `${m.layer?.toUpperCase() || ''} error: ${m.message}`); logEv('error ' + m.message); break;
       default: logEv(m.type);
     }
   }
   stop() { this.sendJSON({ type: 'stop' }); try { this.ws?.close(); } catch { } this.cleanup(); }
   cleanup() {
+    clearTimeout(this.readyTimer);
     player.stop(); this.stream?.getTracks().forEach(t => t.stop()); this.ctx?.close().catch(() => { }); this.stream = null; this.ctx = null;
     setState('idle'); $('#callBtn').disabled = false; $('#hangBtn').disabled = true; if (S.call === this) S.call = null;
   }
 }
 $('#callBtn').onclick = async () => {
-  const b = currentBot(); if (!b) return;
+  callMsg('');
+  if (S.info.auth_required && !S.authed) { showAuth('Enter the access token first.'); callMsg('This deployment needs an access token before calls can start - see the banner at the top.'); return; }
+  const b = currentBot();
+  if (!b) { callMsg('No bot profiles loaded. ' + (S.bootError || 'Reload the page; if it persists check the server logs.')); return; }
+  callMsg('Connecting…', 'warn');
   player.ensure(); S.call = new Call(b); $('#callBtn').disabled = true; $('#hangBtn').disabled = false;
   $('#transcript').innerHTML = ''; resetDash(); await S.call.start();
 };
@@ -335,15 +373,38 @@ function drawSent() {
 }
 
 // ------------------------------------------------------------ boot
-$('#tokenSave').onclick = () => { localStorage.setItem('vao_token', $('#token').value); location.reload(); };
-(async function boot() {
+$('#tokenForm').onsubmit = async e => {
+  e.preventDefault();
+  const t = $('#token').value.trim(); if (!t) { $('#tokenErr').textContent = 'Please paste the token.'; return; }
+  const r = await fetch('/api/auth/check', { headers: { 'X-Access-Token': t } }).catch(() => null);
+  if (!r) { $('#tokenErr').textContent = 'Network error - could not reach the server.'; return; }
+  if (r.status === 401) { $('#tokenErr').textContent = '✗ That token was rejected. It must exactly match APP_ACCESS_TOKEN in Render → Environment.'; return; }
+  localStorage.setItem('vao_token', t); $('#authPanel').classList.add('hidden'); await loadAll();
+};
+$('#tokenChange').onclick = () => showAuth('');
+async function loadAll() {
   try {
-    S.info = await (await fetch('/api/info')).json(); $('#ver').textContent = 'v' + S.info.version;
-    if (S.info.auth_required && !token()) { $('#authbox').classList.remove('hidden'); return; }
+    if (S.info.auth_required) {
+      const r = await fetch('/api/auth/check', { headers: { 'X-Access-Token': token() } });
+      if (r.status === 401) { showAuth(token() ? 'The saved access token was rejected. Enter the correct APP_ACCESS_TOKEN.' : ''); callMsg('Locked: enter the access token (banner above) to load bots and start calls.', 'warn'); return; }
+      S.authed = true; $('#authbox').classList.remove('hidden');
+    }
     S.providers = (await api('/api/providers')).providers;
     S.langs = (await api('/api/languages')).languages;
     renderProviders(); renderLangs(); renderKeys(); await loadBots();
     if (S.bots[0]) editBot(S.bots[0]);
+    if (!S.bots.length) { S.bootError = 'The server returned no bot profiles.'; callMsg(S.bootError + ' Create one in the Bot Profiles tab.'); }
+    else callMsg('');
     drawSent();
-  } catch (e) { addMsg('err', 'Failed to load: ' + e.message); }
+  } catch (e) {
+    if (e.auth) return;
+    S.bootError = 'Failed to load from server: ' + e.message;
+    $('#bootErr').textContent = '⚠ ' + S.bootError; $('#bootErr').classList.remove('hidden');
+  }
+}
+(async function boot() {
+  try {
+    S.info = await (await fetch('/api/info')).json(); $('#ver').textContent = 'v' + S.info.version;
+  } catch (e) { $('#bootErr').textContent = '⚠ Cannot reach the server: ' + e.message; $('#bootErr').classList.remove('hidden'); return; }
+  await loadAll();
 })();
