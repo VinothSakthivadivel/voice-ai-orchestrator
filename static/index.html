@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Voice AI Orchestrator</title>
+<link rel="stylesheet" href="/static/styles.css" />
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+</head>
+<body>
+<header>
+  <div class="brand"><span class="logo">◉</span> Voice AI Orchestrator <span class="ver" id="ver"></span></div>
+  <nav id="tabs">
+    <button data-tab="console" class="active">Live Console</button>
+    <button data-tab="bots">Bot Profiles</button>
+    <button data-tab="keys">API Keys</button>
+    <button data-tab="langs">Languages</button>
+    <button data-tab="providers">Providers</button>
+  </nav>
+  <div id="authbox" class="hidden"><input id="token" type="password" placeholder="Access token" /><button id="tokenSave">Unlock</button></div>
+</header>
+
+<main>
+<!-- ============ CONSOLE ============ -->
+<section id="tab-console" class="tab active">
+  <div class="grid3">
+    <div class="card controls">
+      <h3>Call</h3>
+      <label>Bot profile <select id="cBot"></select></label>
+      <div class="row">
+        <button id="callBtn" class="primary big">▶ Start call</button>
+        <button id="hangBtn" class="danger big" disabled>■ End</button>
+      </div>
+      <div class="statebar"><span id="statePill" class="pill idle">idle</span><span id="stackInfo" class="muted small"></span></div>
+      <div class="meter"><div id="meterBar"></div><div id="meterFloor"></div></div>
+      <div class="small muted" id="meterTxt">mic: –</div>
+      <h4>Live controls</h4>
+      <label>LLM temperature <b id="vTemp">0.6</b><input type="range" id="lTemp" min="0" max="1.5" step="0.05" value="0.6"></label>
+      <label>Speaking speed <b id="vSpeed">1.0</b><input type="range" id="lSpeed" min="0.5" max="2" step="0.05" value="1"></label>
+      <label>Pitch <b id="vPitch">0</b><input type="range" id="lPitch" min="-10" max="10" step="1" value="0"></label>
+      <label>Emotion / style <select id="lStyle">
+        <option value="">neutral</option><option>cheerful</option><option>empathetic</option><option>calm</option>
+        <option>friendly</option><option>excited</option><option>serious</option><option>sad</option><option>customerservice</option>
+      </select></label>
+      <label class="chk"><input type="checkbox" id="lBarge" checked> Barge-in (interrupt bot by speaking)</label>
+      <label class="chk"><input type="checkbox" id="lSpk"> Primary-speaker lock (ignore other voices)</label>
+      <button id="enrollBtn" class="small-btn">🎙 Re-enroll my voice</button>
+      <label>Speaker threshold <b id="vThr">0.80</b><input type="range" id="lThr" min="0.5" max="0.99" step="0.01" value="0.8"></label>
+      <button id="interruptBtn" class="small-btn">✋ Interrupt bot</button>
+      <p class="small muted">Browser echo cancellation, noise suppression and auto-gain are always on. Server-side noise reduction is set per profile.</p>
+    </div>
+
+    <div class="card transcript-card">
+      <h3>Transcript</h3>
+      <div id="transcript"></div>
+      <form id="textForm" class="row"><input id="textIn" placeholder="Type a message (works without a mic)…" /><button class="primary">Send</button></form>
+    </div>
+
+    <div class="card dash">
+      <h3>Latency (last turn)</h3>
+      <div id="latBars"></div>
+      <table class="mini" id="latTable"><thead><tr><th>#</th><th>STT</th><th>LLM TTFT</th><th>LLM</th><th>TTS 1st</th><th>E2E</th></tr></thead><tbody></tbody></table>
+      <h3>Sentiment &amp; emotion</h3>
+      <div class="row"><span id="emoBadge" class="pill">—</span><span id="sentScore" class="muted small"></span></div>
+      <canvas id="sentChart" width="360" height="140"></canvas>
+      <h3>Session</h3>
+      <div class="kv" id="sessKv"></div>
+      <h3>Events</h3>
+      <div id="events" class="events"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ BOTS ============ -->
+<section id="tab-bots" class="tab">
+  <div class="grid2">
+    <div class="card">
+      <h3>Bot profiles</h3>
+      <div id="botList"></div>
+      <button id="newBot" class="primary">+ New bot</button>
+    </div>
+    <div class="card">
+      <h3 id="botFormTitle">Edit bot</h3>
+      <form id="botForm" class="form">
+        <input type="hidden" name="id" />
+        <fieldset><legend>General</legend>
+          <label>Name <input name="name" required /></label>
+          <label>Description <input name="description" /></label>
+          <label>Language <select name="language" id="fLang"></select></label>
+          <div id="langSupport" class="small"></div>
+        </fieldset>
+        <fieldset><legend>Speech-to-Text</legend>
+          <label>Provider <select name="stt.provider" data-layer="stt"></select></label>
+          <label>Model <input name="stt.model" list="sttModels" placeholder="default" /><datalist id="sttModels"></datalist></label>
+          <label class="chk"><input type="checkbox" name="stt.diarization" /> Request provider diarization</label>
+        </fieldset>
+        <fieldset><legend>LLM</legend>
+          <label>Provider <select name="llm.provider" data-layer="llm"></select></label>
+          <label>Model <input name="llm.model" list="llmModels" placeholder="default" /><datalist id="llmModels"></datalist></label>
+          <label>Temperature <input type="number" step="0.05" min="0" max="2" name="llm.temperature" /></label>
+          <label>Max tokens <input type="number" min="16" max="8192" name="llm.max_tokens" /></label>
+          <label>History turns <input type="number" min="0" max="100" name="llm.history_turns" /></label>
+          <label class="wide">System prompt / persona <textarea name="llm.system_prompt" rows="5"></textarea></label>
+          <label class="wide">Greeting (spoken at call start) <input name="llm.greeting" /></label>
+        </fieldset>
+        <fieldset><legend>Text-to-Speech</legend>
+          <label>Provider <select name="tts.provider" data-layer="tts"></select></label>
+          <label>Model <input name="tts.model" list="ttsModels" placeholder="default" /><datalist id="ttsModels"></datalist></label>
+          <label>Voice <input name="tts.voice" list="ttsVoices" placeholder="default for language" /><datalist id="ttsVoices"></datalist></label>
+          <label>Speed <input type="number" step="0.05" min="0.25" max="4" name="tts.speed" /></label>
+          <label>Pitch (-10..10) <input type="number" step="1" min="-10" max="10" name="tts.pitch" /></label>
+          <label>Emotion / style <input name="tts.style" list="styles" placeholder="neutral" /><datalist id="styles"><option>cheerful</option><option>empathetic</option><option>calm</option><option>friendly</option><option>excited</option><option>serious</option><option>sad</option><option>customerservice</option></datalist></label>
+          <label>Style degree (Azure) <input type="number" step="0.1" min="0.01" max="2" name="tts.style_degree" /></label>
+          <label>Stability (ElevenLabs) <input type="number" step="0.05" min="0" max="1" name="tts.stability" /></label>
+          <label>Similarity (ElevenLabs) <input type="number" step="0.05" min="0" max="1" name="tts.similarity" /></label>
+          <label>Style exaggeration (ElevenLabs) <input type="number" step="0.05" min="0" max="1" name="tts.style_exaggeration" /></label>
+        </fieldset>
+        <fieldset><legend>Turn-taking &amp; audio</legend>
+          <label>VAD <select name="vad.mode"><option value="energy">energy (adaptive)</option><option value="webrtc">webrtc + energy</option></select></label>
+          <label>VAD margin dB <input type="number" step="1" name="vad.margin_db" /></label>
+          <label>Min speech ms <input type="number" step="10" name="vad.min_speech_ms" /></label>
+          <label>End-of-turn silence ms <input type="number" step="50" name="vad.end_silence_ms" /></label>
+          <label class="chk"><input type="checkbox" name="vad.barge_in" /> Barge-in enabled</label>
+          <label>Barge-in after ms of speech <input type="number" step="50" name="vad.barge_in_ms" /></label>
+          <label class="chk"><input type="checkbox" name="audio.noise_reduction" /> Server noise reduction</label>
+          <label>Noise reduction strength <input type="number" step="0.1" name="audio.noise_strength" /></label>
+        </fieldset>
+        <fieldset><legend>Speaker &amp; sentiment</legend>
+          <label class="chk"><input type="checkbox" name="speaker.enabled" /> Primary-speaker lock</label>
+          <label>Similarity threshold <input type="number" step="0.01" min="0" max="1" name="speaker.threshold" /></label>
+          <label>Enrollment seconds <input type="number" step="0.5" name="speaker.enroll_seconds" /></label>
+          <label class="chk"><input type="checkbox" name="speaker.use_provider_diarization" /> Keep only primary diarized speaker's words</label>
+          <label>Sentiment <select name="sentiment.mode"><option value="lexicon">lexicon (instant)</option><option value="llm">LLM-based</option><option value="off">off</option></select></label>
+        </fieldset>
+        <div class="row">
+          <button class="primary" type="submit">💾 Save</button>
+          <button type="button" id="dupBot">Duplicate</button>
+          <button type="button" id="delBot" class="danger">Delete</button>
+          <button type="button" id="useBot">Use in console →</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<!-- ============ KEYS ============ -->
+<section id="tab-keys" class="tab">
+  <div class="card">
+    <h3>Bring your own keys</h3>
+    <p class="muted">Keys are kept in this browser only (session storage by default) and sent to the server per call over the WebSocket. They are never written to disk or logs on the server. Server-side env vars (if configured) are used as fallback.</p>
+    <label class="chk"><input type="checkbox" id="rememberKeys"> Remember keys in this browser (localStorage)</label>
+    <div id="keyGroups" class="keygrid"></div>
+    <div class="row"><button id="saveKeys" class="primary">Save keys</button><button id="clearKeys" class="danger">Clear all keys</button></div>
+  </div>
+</section>
+
+<!-- ============ LANGS ============ -->
+<section id="tab-langs" class="tab">
+  <div class="card">
+    <h3>Indian language support matrix</h3>
+    <p class="muted small">Which provider supports which language for STT / TTS (LLMs accept all languages; quality varies). Codes are mapped per provider automatically.</p>
+    <div class="tablewrap"><table id="langTable" class="matrix"></table></div>
+  </div>
+</section>
+
+<!-- ============ PROVIDERS ============ -->
+<section id="tab-providers" class="tab">
+  <div class="card"><h3>Providers</h3><div id="provList" class="provgrid"></div></div>
+</section>
+</main>
+<footer class="muted small">Voice AI Orchestrator · FastAPI + WebSocket · BYO keys</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>

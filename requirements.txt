@@ -1,0 +1,10 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+httpx>=0.27
+numpy>=1.26
+pydantic>=2.7
+boto3>=1.34            # AWS Bedrock (LLM) + Polly (TTS)
+amazon-transcribe>=0.6.2  # AWS Transcribe streaming (STT)
+# Optional upgrades (uncomment to enable):
+# webrtcvad-wheels>=2.0.14   # VAD mode "webrtc"
+# noisereduce>=3.0           # stronger server-side noise reduction (pulls scipy)
